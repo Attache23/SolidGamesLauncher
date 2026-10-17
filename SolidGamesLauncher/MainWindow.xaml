@@ -330,7 +330,39 @@
 
                     <!-- Верхняя полоса окна -->
                     <Grid Grid.Row="0" Height="42" LayoutTransform="{DynamicResource AdaptiveScale}" Background="Transparent" MouseLeftButtonDown="TopBar_MouseLeftButtonDown">
-                        <TextBlock Text="SOLIDGAMES LAUNCHER" Foreground="#88928D" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                        <Button x:Name="UpdateAvailableBtn" 
+                 Content="⬆ Доступно обновление лаунчера" 
+                 Visibility="Collapsed"
+                 Background="#2E7D32" 
+                 Foreground="#FFFFFF" 
+                 FontWeight="Bold" 
+                 FontSize="12" 
+                 Padding="12,4" 
+                 Margin="0" 
+                 HorizontalAlignment="Stretch"
+                 VerticalAlignment="Stretch"
+                 BorderThickness="0" 
+                 Cursor="Hand"
+                 Click="UpdateAvailableBtn_Click"/>
+                        <TextBlock Text="SOLIDGAMES LAUNCHER" 
+                    FontSize="13" 
+                    FontWeight="SemiBold" 
+                    VerticalAlignment="Center" 
+                    Margin="12,0,0,0"
+                    IsHitTestVisible="False">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <!-- Обычный цвет, когда обновления нет -->
+                                    <Setter Property="Foreground" Value="#88928D"/>
+                                    <Style.Triggers>
+                                        <!-- Автоматически становится белым, когда видна зеленая плашка -->
+                                        <DataTrigger Binding="{Binding Visibility, ElementName=UpdateAvailableBtn}" Value="Visible">
+                                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
 
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,6,8,0">
                             <Button Content="—" Style="{StaticResource WindowControlBtnStyle}" Click="MinimizeWindow_Click" ToolTip="Свернуть"/>
@@ -364,12 +396,18 @@
                                     </Grid>
                                 </Border>
                                 <!-- Большая надпись, если не выбрана папка с модами Resilio -->
-                                <Border x:Name="ResilioWarningBanner" Background="#443A1010" BorderBrush="#FF4444" BorderThickness="1" Margin="22,18,22,0" Padding="20,16">
+                                <!-- Большая кликабельная надпись, если не выбрана папка с модами Resilio -->
+                                <Border x:Name="ResilioWarningBanner" 
+                     Background="#443A1010" 
+                     BorderBrush="#FF4444" 
+                     BorderThickness="1" 
+                     Margin="22,18,22,0" 
+                     Padding="20,16"
+                     Cursor="Hand"
+                     MouseLeftButtonUp="ResilioWarningBanner_Click">
                                     <StackPanel HorizontalAlignment="Center">
-                                        <TextBlock Text="ВЫБЕРИТЕ ПАПКУ С МОДАМИ RESILIO ДЛЯ ЗАПУСКА ИГРЫ" 
-                   Foreground="#FF5555" FontSize="18" FontWeight="Bold" TextAlignment="Center" TextWrapping="Wrap"/>
-                                        <TextBlock Text="Перейдите во вкладку «МОДЫ» и укажите папку, куда скачались моды" 
-                   Foreground="#D8DDD9" FontSize="13.5" TextAlignment="Center" Margin="0,6,0,0"/>
+                                        <TextBlock Text="ВЫБЕРИТЕ ПАПКУ С МОДАМИ RESILIO ДЛЯ ЗАПУСКА ИГРЫ" Foreground="#FF5555" FontSize="18" FontWeight="Bold" TextAlignment="Center" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Нажмите сюда, чтобы сразу выбрать папку с модами, или перейдите во вкладку «МОДЫ»" Foreground="#D8DDD9" FontSize="13.5" TextAlignment="Center" Margin="0,6,0,0" TextDecorations="Underline"/>
                                     </StackPanel>
                                 </Border>
                                 <Border Style="{StaticResource ArmaStripeRowStyle}">
@@ -459,10 +497,143 @@
                             <!-- ==================== ВКЛАДКА: МОДЫ ==================== -->
                             <ScrollViewer x:Name="PageMods" VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
                                 <StackPanel LayoutTransform="{DynamicResource AdaptiveScale}">
+
+                                    <!-- ЗАГОЛОВОК 1: МОДЫ WORKSHOP -->
+                                    <Border Style="{StaticResource ArmaSectionHeaderBorderStyle}">
+                                        <TextBlock Text="МОДЫ WORKSHOP" Foreground="#68C76B" FontSize="15.5" FontWeight="Bold"/>
+                                    </Border>
+
+                                    <Border Style="{StaticResource ArmaStripeRowStyle}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                <TextBlock Text="Коллекция модов проекта в Steam Workshop" Foreground="#FFFFFF" FontSize="14.5" FontWeight="SemiBold"/>
+                                                <TextBlock Text="@RHSAFRF, @RHSUSAF, @RHSGREF, @RHSSAF, @CUP Terrains - Core" Foreground="#9AA49E" FontSize="13"/>
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="ПОДПИСАТЬСЯ В STEAM WORKSHOP" Height="38" Width="280" Style="{StaticResource ArmaActionBtnStyle}" Click="SubscribeSteamWorkshop_Click"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- ЗАГОЛОВОК 2: АВТОМАТИЧЕСКАЯ УСТАНОВКА -->
+                                    <Border Style="{StaticResource ArmaSectionHeaderBorderStyle}">
+                                        <TextBlock Text="АВТОМАТИЧЕСКАЯ УСТАНОВКА" Foreground="#68C76B" FontSize="15.5" FontWeight="Bold"/>
+                                    </Border>
+
+                                    <Border Style="{StaticResource ArmaStripeRowStyle}">
+                                        <StackPanel>
+                                            <!-- Верхняя часть: Заголовок и кнопка (Скачать / Пауза / Продолжить) -->
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+
+                                                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                                    <TextBlock Text="Автоматическая установка модов" Foreground="#E0E4E1" FontSize="15" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="Выбор папки и запуск загрузки" Foreground="#88928D" FontSize="12"/>
+                                                </StackPanel>
+
+                                                <Button x:Name="OneClickDownloadModsBtn" 
+                                                        Grid.Column="1" 
+                                                        Content="СКАЧАТЬ МОДЫ" 
+                                                        Height="34" 
+                                                        MinWidth="210"
+                                                        Padding="16,0" 
+                                                        Style="{StaticResource ArmaActionBtnStyle}" 
+                                                        Click="OneClickDownloadMods_Click"/>
+                                            </Grid>
+
+                                            <!-- Блок 1: Полоса активного скачивания (Синий цвет - качает) -->
+                                            <StackPanel x:Name="ResilioDownloadActivePanel" Visibility="Collapsed" Margin="0,12,0,0">
+                                                <!-- Статус и скорость -->
+                                                <Grid Margin="0,0,0,6">
+                                                    <TextBlock x:Name="ResilioSyncStatusTitle" 
+                                                               Text="⬇ Скачивание модов..." 
+                                                               Foreground="#29B6F6" 
+                                                               FontSize="13" 
+                                                               FontWeight="Bold" 
+                                                               HorizontalAlignment="Left"/>
+                                                    <TextBlock x:Name="ResilioSpeedText" 
+                                                               Text="Скорость: 0.0 МБ/с" 
+                                                               Foreground="#29B6F6" 
+                                                               FontSize="13" 
+                                                               FontWeight="SemiBold" 
+                                                               HorizontalAlignment="Right"/>
+                                                </Grid>
+
+                                                <!-- Синяя полоса прогресса -->
+                                                <ProgressBar x:Name="ResilioProgressBar" 
+                                                             Height="10" 
+                                                             Minimum="0" 
+                                                             Maximum="100" 
+                                                             Value="0" 
+                                                             Background="#14181B" 
+                                                             Foreground="#2196F3" 
+                                                             BorderBrush="#263238" 
+                                                             BorderThickness="1"/>
+
+                                                <!-- Сколько скачалось и сколько осталось -->
+                                                <Grid Margin="0,6,0,0">
+                                                    <TextBlock x:Name="ResilioDownloadedText" 
+                                                               Text="Скачано: 0.00 ГБ" 
+                                                               Foreground="#B0BEC5" 
+                                                               FontSize="12" 
+                                                               HorizontalAlignment="Left"/>
+                                                    <TextBlock x:Name="ResilioRemainingText" 
+                                                               Text="Осталось: 0.00 ГБ (0%)" 
+                                                               Foreground="#B0BEC5" 
+                                                               FontSize="12" 
+                                                               HorizontalAlignment="Right"/>
+                                                </Grid>
+                                            </StackPanel>
+
+                                            <!-- Блок 2: Надпись после завершения загрузки (появляется вместо полосы) -->
+                                            <Border x:Name="ResilioDownloadCompletePanel" 
+                                                    Visibility="Collapsed" 
+                                                    Background="#142618" 
+                                                    BorderBrush="#2E7D32" 
+                                                    BorderThickness="1" 
+                                                    CornerRadius="3" 
+                                                    Padding="10,6" 
+                                                    Margin="0,10,0,0">
+                                                <TextBlock Text="✔ Все моды успешно загружены и готовы к запуску игры" 
+                                                           Foreground="#68C76B" 
+                                                           FontSize="13" 
+                                                           FontWeight="SemiBold"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- Выбор папки с модами + постоянная кнопка УДАЛИТЬ МОДЫ -->
+                                    <Border Style="{StaticResource ArmaStripeRowStyle}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="10"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,15,0">
+                                                <TextBlock x:Name="ResilioModsFolderText" Text="Папка модов Resilio: не выбрана" Foreground="#FFFFFF" FontSize="14.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock x:Name="ResilioModsCheckText" Text="Укажите папку, куда скачались @sg_core, @sg_islands и @sg_mods" Foreground="#FF6B6B" FontSize="13" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <Button Grid.Column="1" Content="ВЫБРАТЬ ПАПКУ С МОДАМИ" Height="38" Width="260" Style="{StaticResource ArmaActionBtnStyle}" Click="SelectResilioModsFolder_Click"/>
+                                            <Button x:Name="DeleteResilioModsBtn" Grid.Column="3" Content="УДАЛИТЬ МОДЫ" Height="38" Width="140" Style="{StaticResource ArmaActionBtnStyle}" Foreground="#FF6B6B" Click="DeleteResilioMods_Click"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- ЗАГОЛОВОК 3: РУЧНАЯ УСТАНОВКА -->
+                                    <Border Style="{StaticResource ArmaSectionHeaderBorderStyle}">
+                                        <TextBlock Text="РУЧНАЯ УСТАНОВКА" Foreground="#68C76B" FontSize="15.5" FontWeight="Bold"/>
+                                    </Border>
+
                                     <Border Style="{StaticResource ArmaStripeRowStyle}">
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Text="Статус клиента Resilio Sync:  " Foreground="#E0E4E1" FontSize="15" VerticalAlignment="Center"/>
-                                            <TextBlock x:Name="ResilioStatusText" Text="Не установлено" Foreground="#FF4444" FontWeight="Bold" FontSize="15" VerticalAlignment="Center"/>
+                                            <TextBlock x:Name="ResilioStatusText" Text="Не установлен" Foreground="#FF4444" FontWeight="Bold" FontSize="15" VerticalAlignment="Center"/>
                                         </StackPanel>
                                     </Border>
 
@@ -475,20 +646,6 @@
                                             </Grid.ColumnDefinitions>
                                             <Button x:Name="InstallResilioBtn" Grid.Column="0" Content="1. СКАЧАТЬ / УСТАНОВИТЬ RESILIO SYNC" Height="38" Style="{StaticResource ArmaActionBtnStyle}" Click="InstallResilio_Click"/>
                                             <Button x:Name="SyncResilioModsBtn" Grid.Column="2" Content="2. СКАЧАТЬ МОДЫ ЧЕРЕЗ RESILIO" Height="38" Style="{StaticResource ArmaActionBtnStyle}" IsEnabled="False" Click="DownloadResilioMods_Click"/>
-                                        </Grid>
-                                    </Border>
-
-                                    <Border Style="{StaticResource ArmaStripeRowStyle}">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,15,0">
-                                                <TextBlock x:Name="ResilioModsFolderText" Text="Папка модов Resilio: не выбрана" Foreground="#FFFFFF" FontSize="14.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                                                <TextBlock x:Name="ResilioModsCheckText" Text="Укажите папку, куда скачались @sg_core, @sg_islands и @sg_mods" Foreground="#FF6B6B" FontSize="13" Margin="0,2,0,0"/>
-                                            </StackPanel>
-                                            <Button Grid.Column="1" Content="ВЫБРАТЬ ПАПКУ С МОДАМИ (RESILIO)" Height="38" Width="280" Style="{StaticResource ArmaActionBtnStyle}" Click="SelectResilioModsFolder_Click"/>
                                         </Grid>
                                     </Border>
 
@@ -519,30 +676,32 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <Border Style="{StaticResource ArmaStripeRowStyle}">
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" VerticalAlignment="Center">
-                                                <TextBlock Text="Коллекция модов проекта в Steam Workshop" Foreground="#FFFFFF" FontSize="14.5" FontWeight="SemiBold"/>
-                                                <TextBlock Text="@RHSAFRF, @RHSUSAF, @RHSGREF, @RHSSAF, @CUP Terrains - Core" Foreground="#9AA49E" FontSize="13"/>
-                                            </StackPanel>
-                                            <Button Grid.Column="1" Content="ПОДПИСАТЬСЯ В STEAM WORKSHOP" Height="38" Width="280" Style="{StaticResource ArmaActionBtnStyle}" Click="SubscribeSteamWorkshop_Click"/>
-                                        </Grid>
-                                    </Border>
                                 </StackPanel>
                             </ScrollViewer>
 
                             <!-- ==================== 2. ВКЛАДКА: TEAMSPEAK 3 ==================== -->
                             <StackPanel x:Name="PageTs" LayoutTransform="{DynamicResource AdaptiveScale}" Visibility="Collapsed">
-                                <!-- Статус установки TeamSpeak 3-->
+                                <!-- Статус клиента TeamSpeak 3 -->
                                 <Border Style="{StaticResource ArmaStripeRowStyle}">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="Статус клиента TeamSpeak 3:  " Foreground="#E0E4E1" FontSize="15" VerticalAlignment="Center"/>
-                                        <TextBlock x:Name="TsStatusText" Text="Не установлено" Foreground="#FF4444" FontWeight="Bold" FontSize="15" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="TsStatusText" Text="Не установлен" Foreground="#FF4444" FontWeight="Bold" FontSize="15" VerticalAlignment="Center"/>
                                     </StackPanel>
+                                </Border>
+
+                                <!-- Статус плагина рации TFAR -->
+                                <Border Style="{StaticResource ArmaStripeRowStyle}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                            <TextBlock Text="Статус плагина рации (TFAR):  " Foreground="#E0E4E1" FontSize="15"/>
+                                            <TextBlock x:Name="TfarPluginStatusText" Text="Проверка..." Foreground="#FF4444" FontWeight="Bold" FontSize="15"/>
+                                        </StackPanel>
+                                        <Button x:Name="AutoInstallTfarBtn" Grid.Column="1" Content="УСТАНОВИТЬ АВТОМАТИЧЕСКИ" Height="32" Padding="14,0" Style="{StaticResource ArmaActionBtnStyle}" Click="AutoInstallTfarPlugin_Click"/>
+                                    </Grid>
                                 </Border>
 
                                 <!-- Кнопки скачивания клиента-->
@@ -720,7 +879,7 @@
                                     </Grid>
                                 </Border>
 
-                                <!-- Белый непрозрачный контейнер, чтобы прозрачный фон сайта solid-stats.web.app был чисто белым, как в браузере -->
+                                <!-- Белый непрозрачный контейнер -->
                                 <Border Grid.Row="1" Background="#FFFFFF">
                                     <wv2:WebView2 x:Name="StatsWebView" ZoomFactor="0.80" DefaultBackgroundColor="White"/>
                                 </Border>
@@ -729,12 +888,12 @@
                         </Grid>
                     </Border>
 
-                    <!-- Нижняя правая панель с кликабельной подписью SolidGames Launcher by Natrii -->
+                    <!-- Нижняя правая панель с кликабельной подписью -->
                     <Border Grid.Row="3" Background="#66080A09" BorderBrush="#1F2622" BorderThickness="0,1,0,0" Padding="14,5" LayoutTransform="{DynamicResource AdaptiveScale}">
-                        <Button HorizontalAlignment="Right" VerticalAlignment="Center" Cursor="Hand" Background="Transparent" BorderThickness="0" Click="AuthorProfileLink_Click" ToolTip="Открыть профиль https://sg.zone/profile/Natrii">
+                        <Button HorizontalAlignment="Right" VerticalAlignment="Center" Cursor="Hand" Background="Transparent" BorderThickness="0" Click="AuthorProfileLink_Click" ToolTip="Открыть https://github.com/Attache23/SolidGamesLauncher">
                             <Button.Template>
                                 <ControlTemplate TargetType="Button">
-                                    <TextBlock x:Name="creditText" Text="SolidGames Launcher v1.0 by Natrii" Foreground="#88928D" FontSize="11.5"/>
+                                    <TextBlock x:Name="creditText" Text="SolidGames Launcher v1.2.0 by Natrii" Foreground="#88928D" FontSize="11.5"/>
                                     <ControlTemplate.Triggers>
                                         <Trigger Property="IsMouseOver" Value="True">
                                             <Setter TargetName="creditText" Property="Foreground" Value="#68C76B"/>

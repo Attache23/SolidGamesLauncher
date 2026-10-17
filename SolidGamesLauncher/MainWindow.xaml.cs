@@ -17,6 +17,9 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
+using System.IO.Compression;
+using System.Net.Http;
+using DiscordRPC;
 
 namespace Arma3Launcher
 {
@@ -47,6 +50,15 @@ namespace Arma3Launcher
         private readonly DispatcherTimer _resilioCheckTimer;
         private readonly DispatcherTimer _serverStatusTimer;
 
+        // Настройки автообновления (укажите ваш логин GitHub и название репозитория)
+        private static string CurrentLauncherVersion =>
+    System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0";
+        private const string GitHubRepoUrl = "https://api.github.com/repos/Attache23/SolidGamesLauncher/releases/latest";
+        private string _latestReleaseUrl = "https://github.com/Attache23/SolidGamesLauncher/releases";
+
+        // Discord Rich Presence (вставьте Application ID вашего приложения из Discord Developer Portal)
+        private const string DiscordAppId = "1560996176751362128";
+        private DiscordRpcClient? _discordClient;
         // Все служебные файлы и кэш WebView2 хранятся в AppData\Local\SolidGamesLauncher,
         private static readonly string AppDataDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -101,7 +113,9 @@ namespace Arma3Launcher
         }
 
         public MainWindow()
+
         {
+
             Directory.CreateDirectory(AppDataDirectory);
 
             InitializeComponent();
@@ -117,22 +131,86 @@ namespace Arma3Launcher
             _ = UpdateBothServersPlayerCountAsync();
 
             _resilioCheckTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            _resilioCheckTimer.Tick += (_, _) =>
+            _resilioCheckTimer.Tick += async (_, _) =>
             {
                 CheckResilioInstallation();
                 if (string.IsNullOrEmpty(_resilioModsPath) || !HasAllResilioMods(_resilioModsPath))
                 {
                     TryAutoDetectResilioModsFolder();
                     UpdateResilioModsFolderUi();
+
                 }
+
+                RefreshDiscordPresence();
+
+                // Обновляет синюю полосу скачивания, скорость и статус готовности модов:
+                await UpdateResilioDownloadProgressUiAsync();
             };
             _resilioCheckTimer.Start();
 
             _serverStatusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(25) };
             _serverStatusTimer.Tick += async (_, _) => await UpdateBothServersPlayerCountAsync();
             _serverStatusTimer.Start();
+
+            // Запуск новых функций:
+            CheckTfarPluginInstallation();
+            InitializeDiscordRpc();
+            _ = CheckForUpdatesAsync();
+
+            // При возвращении фокуса в окно лаунчера проверяем статус TS3 и плагина
+            this.Activated += (_, _) =>
+            {
+                CheckTeamSpeakInstallation();
+                CheckTfarPluginInstallation();
+            };
         }
 
+        /// <summary>
+        /// Выполняет автоматический поиск папки с модами Resilio на всех дисках системы
+        /// </summary>
+        private void TryAutoDetectResilioModsFolder()
+        {
+            // Список вероятных путей к сборке модов
+            var candidatePaths = new List<string>
+            {
+                @"C:\SolidGames",
+                @"D:\SolidGames",
+                @"E:\SolidGames",
+                @"C:\SolidGames_Mods",
+                @"D:\SolidGames_Mods",
+                @"E:\SolidGames_Mods",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "SolidGames")
+            };
+
+            // Проверяем все доступные локальные диски
+            try
+            {
+                foreach (var drive in DriveInfo.GetDrives().Where(d => d.IsReady && d.DriveType == DriveType.Fixed))
+                {
+                    candidatePaths.Add(Path.Combine(drive.RootDirectory.FullName, "SolidGames"));
+                    candidatePaths.Add(Path.Combine(drive.RootDirectory.FullName, "Games", "SolidGames"));
+                }
+            }
+            catch { }
+
+            foreach (string path in candidatePaths.Distinct())
+            {
+                if (!Directory.Exists(path)) continue;
+
+                // Проверяем наличие ключевых папок сборки
+                bool hasCore = Directory.Exists(Path.Combine(path, "@sg_core"));
+                bool hasIslands = Directory.Exists(Path.Combine(path, "@sg_islands"));
+                bool hasMods = Directory.Exists(Path.Combine(path, "@sg_mods"));
+
+                if (hasCore || hasIslands || hasMods)
+                {
+                    _resilioModsPath = path;
+                    SaveUserSettings();
+                    _cachedModsIntegrity = CheckModsFolderIntegrity(path);
+                    break;
+                }
+            }
+        }
         private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
         {
             if (ActualWidth <= 0 || ActualHeight <= 0) return;
@@ -282,123 +360,174 @@ namespace Arma3Launcher
         }
 
         // ================= ОТСЛЕЖИВАНИЕ И ВЫБОР ПАПКИ RESILIO MODS =================
-        private bool HasAllResilioMods(string folderPath)
+        // Обработчик клика по красному баннеру во вкладке СЕРВЕРЫ
+        private void ResilioWarningBanner_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
-                return false;
-
-            return Directory.Exists(Path.Combine(folderPath, "@sg_core"));
+            SelectResilioModsFolder_Click(sender, e);
         }
 
-        private void TryAutoDetectResilioModsFolder()
+        private async void SelectResilioModsFolder_Click(object sender, RoutedEventArgs e)
         {
-            if (HasAllResilioMods(_resilioModsPath))
-                return;
-
-            if (HasAllResilioMods(_arma3Path))
+            var dialog = new Microsoft.Win32.OpenFolderDialog
             {
-                _resilioModsPath = _arma3Path;
-                SaveUserSettings();
-                return;
-            }
-
-            string[] syncDatLocations =
-            {
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Resilio Sync", "sync.dat"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Resilio Sync", "sync.dat")
+                Title = "Выберите папку с модами Resilio (@sg_core, @sg_islands, @sg_mods)"
             };
 
-            foreach (string syncDat in syncDatLocations.Where(File.Exists))
-            {
-                try
-                {
-                    using var fs = new FileStream(syncDat, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var sr = new StreamReader(fs, Encoding.UTF8);
-                    string content = sr.ReadToEnd();
+            if (dialog.ShowDialog() != true) return;
 
-                    MatchCollection matches = Regex.Matches(content, @"[A-Za-z]:\\[^""\0\r\n<>|?*]+");
-                    foreach (Match match in matches)
+            string selectedPath = dialog.FolderName;
+
+            // Если пользователь выбрал внутреннюю подпапку (например, сам @sg_core), берем родительскую
+            string folderName = Path.GetFileName(selectedPath.TrimEnd(Path.DirectorySeparatorChar));
+            if (folderName.StartsWith("@sg_", StringComparison.OrdinalIgnoreCase))
+            {
+                string? parent = Path.GetDirectoryName(selectedPath);
+                if (!string.IsNullOrEmpty(parent))
+                    selectedPath = parent;
+            }
+
+            // 1. Останавливаем текущую автозагрузку в старую папку, если она шла
+            StopEmbeddedResilioProcess();
+            _isAutoSyncActive = false;
+            _isResilioPaused = false;
+
+            // 2. Проверяем, нет ли внутри чужой папки .sync от другого клиента Resilio
+            CheckAndHandleForeignSyncFolder(selectedPath);
+
+            // 3. Сохраняем новую папку и проверяем целостность файлов
+            _resilioModsPath = selectedPath;
+            SaveUserSettings();
+
+            var integrity = await Task.Run(() => CheckModsFolderIntegrity(selectedPath));
+            _cachedModsIntegrity = integrity;
+
+            UpdateResilioModsFolderUi();
+            await UpdateResilioDownloadProgressUiAsync();
+
+            // 4. Если папки модов есть, но они недокачаны — предлагаем докачать
+            if (integrity.HasDirectories && !integrity.IsFullyReady)
+            {
+                var result = MessageBox.Show(
+                    $"В выбранной папке моды скачаны не полностью:\n" +
+                    $"• Скачано: {integrity.CompletedGb:F2} ГБ из {ExpectedModpackSizeGb:F1} ГБ\n" +
+                    $"• Недокачанных файлов (.!sync / .rsls): {integrity.IncompleteFilesCount}\n\n" +
+                    $"Запустить автоматическую проверку и докачку недостающих файлов?",
+                    "Моды скачаны не полностью",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    _isAutoSyncActive = true;
+                    _isResilioPaused = false;
+                    _resilioResumeGraceUntil = DateTime.UtcNow.AddSeconds(10);
+                    StartResilioAutoSync(_resilioModsPath);
+                    await UpdateResilioDownloadProgressUiAsync();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Проверяет, есть ли в папке каталог .sync от другого клиента Resilio Sync
+        /// </summary>
+        private void CheckAndHandleForeignSyncFolder(string folderPath)
+        {
+            string syncFolderPath = Path.Combine(folderPath, ".sync");
+            if (!Directory.Exists(syncFolderPath)) return;
+
+            string ourMarkerFile = Path.Combine(syncFolderPath, "sg_launcher.marker");
+
+            // Если нет нашего маркера — значит папка .sync создана сторонним клиентом Resilio
+            if (!File.Exists(ourMarkerFile))
+            {
+                var answer = MessageBox.Show(
+                    "В выбранной папке обнаружена служебная папка «.sync» от другого клиента Resilio Sync!\n\n" +
+                    "Если её оставить, возникнет конфликт баз данных (встроенный клиент может начать перекачивать файлы заново).\n\n" +
+                    "Удалить служебную папку «.sync» автоматически? (Сами моды удалены НЕ будут).",
+                    "Обнаружена сторонняя папка .sync",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (answer == MessageBoxResult.Yes)
+                {
+                    try
                     {
-                        string candidate = match.Value.TrimEnd('\\');
-                        if (HasAllResilioMods(candidate))
+                        var dirInfo = new DirectoryInfo(syncFolderPath) { Attributes = FileAttributes.Normal };
+                        foreach (var info in dirInfo.GetFileSystemInfos("*", SearchOption.AllDirectories))
                         {
-                            _resilioModsPath = candidate;
-                            SaveUserSettings();
-                            return;
+                            info.Attributes = FileAttributes.Normal;
                         }
+                        Directory.Delete(syncFolderPath, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Не удалось удалить папку .sync (возможно, открыт сторонний клиент Resilio):\n{ex.Message}",
+                                        "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
                     }
                 }
-                catch { }
             }
+        }
+
+        /// <summary>
+        /// Проверяет не только наличие папок, но и отсутствие недокачанных файлов и полный объем (79.6 ГБ)
+        /// </summary>
+        private bool HasAllResilioMods(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
+                return false;
+
+            // Быстрая проверка наличия 3 базовых директорий
+            bool dirsExist = Directory.Exists(Path.Combine(path, "@sg_core")) &&
+                             Directory.Exists(Path.Combine(path, "@sg_islands")) &&
+                             Directory.Exists(Path.Combine(path, "@sg_mods"));
+
+            if (!dirsExist) return false;
+
+            // Если путь совпадает с последним проверенным — используем точный результат проверки целостности
+            if (_cachedModsIntegrity.CheckedPath == path)
+                return _cachedModsIntegrity.IsFullyReady;
+
+            return _cachedModsIntegrity.IsFullyReady;
         }
 
         private void UpdateResilioModsFolderUi()
         {
             if (ResilioModsFolderText == null || ResilioModsCheckText == null) return;
 
-            if (!string.IsNullOrWhiteSpace(_resilioModsPath) && Directory.Exists(_resilioModsPath))
+            if (string.IsNullOrEmpty(_resilioModsPath) || !Directory.Exists(_resilioModsPath))
             {
-                ResilioModsFolderText.Text = $"Папка модов Resilio: {_resilioModsPath}";
+                ResilioModsFolderText.Text = "Папка модов Resilio: не выбрана";
+                ResilioModsCheckText.Text = "Укажите папку, куда скачались @sg_core, @sg_islands и @sg_mods";
+                ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 107, 107));
+                if (ResilioWarningBanner != null) ResilioWarningBanner.Visibility = Visibility.Visible;
+                return;
+            }
 
-                var found = _resilioMods.Where(m => Directory.Exists(Path.Combine(_resilioModsPath, m))).ToList();
-                if (found.Count == _resilioMods.Count)
-                {
-                    ResilioModsCheckText.Text = "✓ Найдены все моды: @sg_core, @sg_islands, @sg_mods";
-                    ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(104, 199, 107));
-                }
-                else if (found.Count > 0)
-                {
-                    ResilioModsCheckText.Text = $"Найдено ({found.Count} из 3): {string.Join(", ", found)} (докачайте остальные в Resilio)";
-                    ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 180, 68));
-                }
-                else
-                {
-                    ResilioModsCheckText.Text = "В выбранной папке пока нет @sg_core, @sg_islands, @sg_mods";
-                    ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 90, 90));
-                }
+            ResilioModsFolderText.Text = $"Папка модов Resilio: {_resilioModsPath}";
+
+            var status = _cachedModsIntegrity.CheckedPath == _resilioModsPath
+                ? _cachedModsIntegrity
+                : CheckModsFolderIntegrity(_resilioModsPath);
+
+            _cachedModsIntegrity = status;
+
+            if (status.IsFullyReady)
+            {
+                ResilioModsCheckText.Text = $"✔ Все моды проверены и готовы к игре ({status.CompletedGb:F1} ГБ)";
+                ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(104, 199, 107));
+                if (ResilioWarningBanner != null) ResilioWarningBanner.Visibility = Visibility.Collapsed;
+            }
+            else if (status.HasDirectories)
+            {
+                ResilioModsCheckText.Text = $"⚠ Моды скачаны не полностью: {status.CompletedGb:F2} ГБ из {ExpectedModpackSizeGb:F1} ГБ (недокачано файлов: {status.IncompleteFilesCount})";
+                ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 183, 77));
+                if (ResilioWarningBanner != null) ResilioWarningBanner.Visibility = Visibility.Visible;
             }
             else
             {
-                ResilioModsFolderText.Text = "Папка модов Resilio: не выбрана";
-                ResilioModsCheckText.Text = "Укажите папку, куда скачались моды Resilio";
-                ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 90, 90));
-            }
-            // Проверяем, выбрана ли папка с модами Resilio
-            bool isResilioFolderReady = HasAllResilioMods(_resilioModsPath);
-
-            // Показываем большую надпись во вкладке СЕРВЕРЫ, если папка не выбрана
-            if (ResilioWarningBanner != null)
-            {
-                ResilioWarningBanner.Visibility = isResilioFolderReady ? Visibility.Collapsed : Visibility.Visible;
-            }
-
-            // Делаем кнопку ЗАПУСК серой (неактивной), пока папка не выбрана
-            if (LaunchServerBtn != null) LaunchServerBtn.IsEnabled = isResilioFolderReady;
-            if (LaunchNoServerBtn != null) LaunchNoServerBtn.IsEnabled = isResilioFolderReady;
-        }
-
-        private void SelectResilioModsFolder_Click(object sender, RoutedEventArgs e)
-        {
-            var dialog = new OpenFolderDialog
-            {
-                Title = "Выберите папку, в которой находятся @sg_core, @sg_islands и @sg_mods"
-            };
-
-            if (dialog.ShowDialog() == true)
-            {
-                string selected = dialog.FolderName;
-
-                string folderName = Path.GetFileName(selected.TrimEnd(Path.DirectorySeparatorChar));
-                if (folderName.Equals("@sg_core", StringComparison.OrdinalIgnoreCase) ||
-                    folderName.Equals("@sg_islands", StringComparison.OrdinalIgnoreCase) ||
-                    folderName.Equals("@sg_mods", StringComparison.OrdinalIgnoreCase))
-                {
-                    selected = Path.GetDirectoryName(selected) ?? selected;
-                }
-
-                _resilioModsPath = selected;
-                UpdateResilioModsFolderUi();
-                SaveUserSettings();
+                ResilioModsCheckText.Text = "В выбранной папке не найдены @sg_core, @sg_islands и @sg_mods";
+                ResilioModsCheckText.Foreground = new SolidColorBrush(Color.FromRgb(255, 107, 107));
+                if (ResilioWarningBanner != null) ResilioWarningBanner.Visibility = Visibility.Visible;
             }
         }
 
@@ -412,6 +541,11 @@ namespace Arma3Launcher
 
             Server1PlayersText.Text = s1Task.Result;
             Server2PlayersText.Text = s2Task.Result;
+
+            _server1Players = s1Task.Result;
+            _server2Players = s2Task.Result;
+
+            RefreshDiscordPresence();
         }
 
         private async Task<string> QueryServerPlayersA2SAsync(ServerConfig server)
@@ -803,20 +937,352 @@ namespace Arma3Launcher
 
             if (!string.IsNullOrEmpty(_resilioExePath))
             {
-                ResilioStatusText.Text = "Установлено (Готов к скачиванию модов)";
+                ResilioStatusText.Text = "Установлен";
                 ResilioStatusText.Foreground = new SolidColorBrush(Color.FromRgb(104, 199, 107));
                 SyncResilioModsBtn.IsEnabled = true;
             }
             else
             {
-                ResilioStatusText.Text = "Не установлено";
+                ResilioStatusText.Text = "Не установлен";
                 ResilioStatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 68, 68));
                 SyncResilioModsBtn.IsEnabled = false;
             }
 
             // Одновременно проверяем установку TeamSpeak 3
             CheckTeamSpeakInstallation();
+
         }
+
+            // ================= 1. ПРОВЕРКА И АВТОУСТАНОВКА ПЛАГИНА TFAR =================
+        private void CheckTfarPluginInstallation()
+        {
+            if (TfarPluginStatusText == null) return;
+
+            string appDataPlugins = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "TS3Client", "plugins", "TFAR_win64.dll");
+
+            string? tsExe = FindTeamSpeakExePath();
+            string? installDirPlugins = !string.IsNullOrEmpty(tsExe)
+                ? Path.Combine(Path.GetDirectoryName(tsExe)!, "plugins", "TFAR_win64.dll")
+                : null;
+
+            bool isPluginInstalled = File.Exists(appDataPlugins) ||
+                                     (!string.IsNullOrEmpty(installDirPlugins) && File.Exists(installDirPlugins));
+
+            if (isPluginInstalled)
+            {
+                TfarPluginStatusText.Text = "Установлен (TFAR_win64.dll найден)";
+                TfarPluginStatusText.Foreground = new SolidColorBrush(Color.FromRgb(104, 199, 107));
+                if (AutoInstallTfarBtn != null) AutoInstallTfarBtn.Content = "ПЕРЕУСТАНОВИТЬ ПЛАГИН";
+            }
+            else
+            {
+                TfarPluginStatusText.Text = "Не установлен";
+                TfarPluginStatusText.Foreground = new SolidColorBrush(Color.FromRgb(255, 68, 68));
+                if (AutoInstallTfarBtn != null) AutoInstallTfarBtn.Content = "УСТАНОВИТЬ ПЛАГИН";
+            }
+        }
+
+        private async void AutoInstallTfarPlugin_Click(object sender, RoutedEventArgs e)
+        {
+            string pluginArchivePath = Path.Combine(_resilioModsPath, "@sg_core", "teamspeak", "task_force_radio.ts3_plugin");
+            if (!File.Exists(pluginArchivePath))
+            {
+                MessageBox.Show(
+                    "Не найден файл task_force_radio.ts3_plugin в папке @sg_core\\teamspeak.\n" +
+                    "Убедитесь, что моды Resilio полностью скачаны и выбрана верная папка!",
+                    "Файл не найден", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            try
+            {
+                string? tsExePath = FindTeamSpeakExePath();
+                string? tsDir = !string.IsNullOrEmpty(tsExePath) ? Path.GetDirectoryName(tsExePath) : null;
+                string? installerPath = tsDir != null ? Path.Combine(tsDir, "package_installer.exe") : null;
+
+                Process? process = null;
+
+                if (!string.IsNullOrEmpty(installerPath) && File.Exists(installerPath))
+                {
+                    process = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = installerPath,
+                        Arguments = $"\"{pluginArchivePath}\"",
+                        UseShellExecute = true
+                    });
+                }
+                else
+                {
+                    process = Process.Start(new ProcessStartInfo(pluginArchivePath)
+                    {
+                        UseShellExecute = true
+                    });
+                }
+
+                if (process != null)
+                {
+                    // Временно меняем текст кнопки, показывая что ждем установку
+                    if (AutoInstallTfarBtn != null) AutoInstallTfarBtn.IsEnabled = false;
+
+                    // Ждем, пока пользователь нажмет Install в окне TeamSpeak и закроет его
+                    await process.WaitForExitAsync();
+
+                    // Небольшая задержка на полсекунды для завершения записи файлов на диск
+                    await Task.Delay(500);
+
+                    // Моментально обновляем статус
+                    CheckTfarPluginInstallation();
+
+                    if (AutoInstallTfarBtn != null) AutoInstallTfarBtn.IsEnabled = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (AutoInstallTfarBtn != null) AutoInstallTfarBtn.IsEnabled = true;
+
+                MessageBox.Show(
+                    $"Не удалось запустить установщик плагина:\n{ex.Message}\n\n" +
+                    $"Вы можете установить его вручную двойным кликом по файлу:\n{pluginArchivePath}",
+                    "Ошибка установки", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        // Переменные для хранения информации о новом релизе
+        private string? _downloadExeUrl;
+        private string? _newVersionTag;
+
+        // ================= АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ ЛАУНЧЕРА =================
+        private async Task CheckForUpdatesAsync()
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("SolidGamesLauncher");
+
+                string json = await http.GetStringAsync(GitHubRepoUrl);
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                string? latestTag = doc.RootElement.GetProperty("tag_name").GetString()?.TrimStart('v', 'V');
+                _newVersionTag = latestTag;
+
+                // Ищем прямую ссылку на скачивание файла .exe из релиза на GitHub
+                if (doc.RootElement.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var asset in assets.EnumerateArray())
+                    {
+                        string? name = asset.GetProperty("name").GetString();
+                        if (name != null && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _downloadExeUrl = asset.GetProperty("browser_download_url").GetString();
+                            break;
+                        }
+                    }
+                }
+
+                // Сравниваем версии
+                if (!string.IsNullOrEmpty(latestTag) &&
+                    Version.TryParse(latestTag, out Version? remoteVer) &&
+                    Version.TryParse(CurrentLauncherVersion, out Version? localVer) &&
+                    remoteVer > localVer)
+                {
+                    // Спрашиваем игрока в главном потоке интерфейса
+                    await Dispatcher.InvokeAsync(async () =>
+                    {
+                        var result = MessageBox.Show(
+                            $"Вышло обновление лаунчера {latestTag}!\n\nХотите обновиться сейчас?",
+                            "Обновление лаунчера",
+                            MessageBoxButton.YesNo,
+                            MessageBoxImage.Question);
+
+                        if (result == MessageBoxResult.Yes)
+                        {
+                            await PerformAutoUpdateAsync();
+                        }
+                        else
+                        {
+                            // Если игрок отказался — показываем небольшую зеленую кнопку во всех вкладках
+                            if (UpdateAvailableBtn != null)
+                            {
+                                UpdateAvailableBtn.Content = $"⬆ Доступно обновление лаунчера {latestTag}";
+                                UpdateAvailableBtn.Visibility = Visibility.Visible;
+                            }
+                        }
+                    });
+                }
+            }
+            catch
+            {
+                /* Игнорируем сетевые сбои, если нет подключения */
+            }
+        }
+
+        private async void UpdateAvailableBtn_Click(object sender, RoutedEventArgs e)
+        {
+            await PerformAutoUpdateAsync();
+        }
+
+        private async Task PerformAutoUpdateAsync()
+        {
+            if (string.IsNullOrEmpty(_downloadExeUrl))
+            {
+                // Запасной вариант: если к релизу забыли прикрепить .exe файл
+                Process.Start(new ProcessStartInfo(_latestReleaseUrl) { UseShellExecute = true });
+                return;
+            }
+
+            try
+            {
+                string currentExePath = Environment.ProcessPath
+                    ?? Process.GetCurrentProcess().MainModule?.FileName
+                    ?? AppContext.BaseDirectory;
+
+                string tempUpdateExe = Path.Combine(Path.GetTempPath(), $"SG_Launcher_Update_{Guid.NewGuid():N}.exe");
+
+                if (UpdateAvailableBtn != null)
+                {
+                    UpdateAvailableBtn.IsEnabled = false;
+                    UpdateAvailableBtn.Content = "Загрузка обновления...";
+                    UpdateAvailableBtn.Visibility = Visibility.Visible;
+                }
+
+                // Скачиваем новый .exe файл во временную директорию
+                using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("SolidGamesLauncher");
+
+                byte[] newExeBytes = await http.GetByteArrayAsync(_downloadExeUrl);
+                await File.WriteAllBytesAsync(tempUpdateExe, newExeBytes);
+
+                // Запускаем скрытую системную команду:
+                // 1. Ждет 1 сек закрытия текущего процесса
+                // 2. Заменяет старый .exe на скачанный
+                // 3. Запускает обновленный лаунчер
+                string cmdScript = $"/c timeout /t 1 /nobreak > NUL & move /y \"{tempUpdateExe}\" \"{currentExePath}\" & start \"\" \"{currentExePath}\"";
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = cmdScript,
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                });
+
+                // Мгновенно закрываем старый лаунчер, чтобы освободить файл
+                Application.Current.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                if (UpdateAvailableBtn != null)
+                {
+                    UpdateAvailableBtn.IsEnabled = true;
+                    UpdateAvailableBtn.Content = $"⬆ Доступно обновление {_newVersionTag}";
+                }
+
+                MessageBox.Show(
+                    $"Не удалось выполнить автообновление:\n{ex.Message}\n\nВы можете обновиться вручную с сайта.",
+                    "Ошибка обновления", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+
+
+                  
+        // ================= 3. DISCORD RICH PRESENCE (RPC) =================
+        // Поля для хранения онлайна и состояния Discord RPC
+        private string _server1Players = "0/0";
+        private string _server2Players = "0/0";
+        private string _lastDiscordDetails = string.Empty;
+        private string _lastDiscordState = string.Empty;
+        private bool _wasArmaRunning = false;
+        private Timestamps _discordTimestamp = Timestamps.Now;
+
+        // ================= 3. DISCORD RICH PRESENCE (RPC) =================
+        private void InitializeDiscordRpc()
+        {
+            try
+            {
+                _discordClient = new DiscordRpcClient(DiscordAppId);
+                _discordClient.Initialize();
+                RefreshDiscordPresence();
+            }
+            catch { }
+        }
+
+        private static bool IsArma3Running()
+        {
+            return Process.GetProcessesByName("arma3_x64").Length > 0 ||
+                   Process.GetProcessesByName("arma3").Length > 0 ||
+                   Process.GetProcessesByName("arma3battleye").Length > 0;
+        }
+
+        private void RefreshDiscordPresence()
+        {
+            if (_discordClient == null) return;
+
+            bool isArmaRunning = IsArma3Running();
+
+            // Если игра только что запустилась или закрылась — сбрасываем таймер проведенного времени
+            if (isArmaRunning != _wasArmaRunning)
+            {
+                _wasArmaRunning = isArmaRunning;
+                _discordTimestamp = Timestamps.Now;
+            }
+
+            string details;
+            string state;
+
+            if (isArmaRunning)
+            {
+                int serverNum = Server2Radio?.IsChecked == true ? 2 : 1;
+                string playersInfo = serverNum == 2 ? _server2Players : _server1Players;
+
+                // Верхняя строка: коротко статус
+                details = "В игре";
+
+                // Нижняя строка: конкретный сервер и счетчик игроков
+                state = $"Сервер {serverNum} • {playersInfo}";
+            }
+            else
+            {
+                details = "В меню лаунчера";
+                state = "Готовится к запуску Arma 3";
+            }
+
+            // Отправляем обновление в Discord только если текст действительно изменился
+            if (details == _lastDiscordDetails && state == _lastDiscordState)
+                return;
+
+            _lastDiscordDetails = details;
+            _lastDiscordState = state;
+
+            UpdateDiscordPresence(details, state);
+        }
+
+        private void UpdateDiscordPresence(string details, string state)
+        {
+            try
+            {
+                _discordClient?.SetPresence(new RichPresence
+                {
+                    Details = details,
+                    State = state,
+                    Timestamps = _discordTimestamp,
+                    Assets = new Assets
+                    {
+                        LargeImageKey = "logo",
+                        LargeImageText = "SolidGames Arma 3"
+                    },
+                    Buttons = new DiscordRPC.Button[]
+                    {
+                        new DiscordRPC.Button { Label = "Сайт проекта SG.ZONE", Url = SgZoneSiteUrl }
+                    }
+                });
+            }
+            catch { }
+        }
+
+
 
         private static string? FindResilioExePath()
         {
@@ -956,7 +1422,7 @@ namespace Arma3Launcher
                     "2. Нажмите ПКМ по раздаче → Настройки:\n" +
                     "   • УБЕРИТЕ галочку с «Сохранять удаленные файлы в архив»\n" +
                     "   • ПОСТАВЬТЕ галочку «Перезаписывать измененные файлы»\n\n" +
-                    "3. После выбора папки в Resilio нажмите кнопку «ВЫБРАТЬ ПАПКУ С МОДАМИ (RESILIO)» в лаунчере.\n\n" +
+                    "3. После выбора папки в Resilio нажмите кнопку «ВЫБРАТЬ ПАПКУ С МОДАМИ» в лаунчере.\n\n" +
                     "Состояния раздачи:\n" +
                     "🔵 Синий круг — идет скачивание\n" +
                     "🟢 Зеленый круг — моды загружены, идет раздача",
@@ -1201,5 +1667,550 @@ namespace Arma3Launcher
                 Application.Current.Shutdown();
             }
         }
+        // ================= RESILIO SYNC: ВСТРОЕННЫЙ ДВИЖОК И UI ЗАГРУЗКИ =================
+
+        // Реальный полный размер сборки модов SolidGames в ГБ
+        private const double ExpectedModpackSizeGb = 79.6;
+
+        // Минимальный порог полностью скачанной сборки (97% от 79.6 ГБ = ~77.2 ГБ), чтобы не считать неполную папку готовой
+        private const double MinCompleteModpackSizeGb = 77.2;
+
+        private readonly Dictionary<string, string> _projectResilioKeys = new()
+        {
+            { "", "BAORERSOCOOW764LYFEVHPMOHUV5FW34M" }
+        };
+
+        private struct ModsIntegrityResult
+        {
+            public string CheckedPath;
+            public bool HasDirectories;
+            public bool HasPboFiles;
+            public int IncompleteFilesCount;
+            public long CompletedBytes;
+            public long TempBytes;
+            public double CompletedGb => CompletedBytes / (1024.0 * 1024.0 * 1024.0);
+            public bool IsFullyReady => HasDirectories && HasPboFiles && IncompleteFilesCount == 0 && CompletedGb >= MinCompleteModpackSizeGb;
+        }
+
+        private ModsIntegrityResult _cachedModsIntegrity;
+        private bool _isAutoSyncActive = false;
+        private bool _isResilioPaused = false;
+        private bool _isScanningProgress = false;
+        private DateTime _resilioResumeGraceUntil = DateTime.MinValue;
+        private long _lastProcessWriteBytes = -1;
+        private DateTime _lastSpeedCheckTime = DateTime.MinValue;
+        private double _smoothedSpeedMbPerSec = 0;
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetProcessIoCounters(IntPtr hProcess, out IO_COUNTERS lpIoCounters);
+
+        /// <summary>
+        /// Глубокая проверка папки с модами: проверяет .pbo, отсутствие .!sync/.rsls и общий размер
+        /// </summary>
+        private static ModsIntegrityResult CheckModsFolderIntegrity(string folderPath)
+        {
+            var result = new ModsIntegrityResult { CheckedPath = folderPath };
+
+            if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
+                return result;
+
+            string coreDir = Path.Combine(folderPath, "@sg_core");
+            string islandsDir = Path.Combine(folderPath, "@sg_islands");
+            string modsDir = Path.Combine(folderPath, "@sg_mods");
+
+            result.HasDirectories = Directory.Exists(coreDir) &&
+                                    Directory.Exists(islandsDir) &&
+                                    Directory.Exists(modsDir);
+
+            int pboCount = 0;
+
+            try
+            {
+                var dirInfo = new DirectoryInfo(folderPath);
+                foreach (var file in dirInfo.EnumerateFiles("*", SearchOption.AllDirectories))
+                {
+                    if (file.FullName.Contains("\\.sync\\", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    string ext = file.Extension;
+                    if (ext.Equals(".!sync", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".rsls", StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.IncompleteFilesCount++;
+                        result.TempBytes += file.Length;
+                    }
+                    else
+                    {
+                        result.CompletedBytes += file.Length;
+                        if (ext.Equals(".pbo", StringComparison.OrdinalIgnoreCase))
+                            pboCount++;
+                    }
+                }
+            }
+            catch { }
+
+            result.HasPboFiles = pboCount > 20;
+            return result;
+        }
+
+        /// <summary>
+        /// Полностью отключает проверку обновлений Resilio Sync в реестре Windows
+        /// </summary>
+        private static void DisableResilioUpdatePromptsInRegistry()
+        {
+            string[] registryPaths =
+            {
+                @"Software\Resilio, Inc.\Resilio Sync",
+                @"Software\BitTorrent\Sync"
+            };
+
+            foreach (string regPath in registryPaths)
+            {
+                try
+                {
+                    using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(regPath);
+                    key?.SetValue("CheckForUpdates", 0, Microsoft.Win32.RegistryValueKind.DWord);
+                    key?.SetValue("check_for_updates", 0, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+                catch { }
+            }
+        }
+
+        private string EnsureResilioExtracted()
+        {
+            string resilioDir = Path.Combine(AppDataDirectory, "ResilioEngine");
+            Directory.CreateDirectory(resilioDir);
+            string targetExePath = Path.Combine(resilioDir, "Resilio Sync.exe");
+
+            var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+            string? resourceName = assembly.GetManifestResourceNames()
+                .FirstOrDefault(name => name.EndsWith("Resilio Sync.exe", StringComparison.OrdinalIgnoreCase));
+
+            if (resourceName == null)
+            {
+                throw new FileNotFoundException(
+                    "Файл 'Resilio Sync.exe' не найден внутри ресурсов лаунчера. " +
+                    "Убедитесь, что Build Action установлен в Embedded Resource.");
+            }
+
+            using (Stream resourceStream = assembly.GetManifestResourceStream(resourceName)!)
+            {
+                if (File.Exists(targetExePath) && new FileInfo(targetExePath).Length == resourceStream.Length)
+                    return targetExePath;
+
+                StopEmbeddedResilioProcess();
+
+                using (FileStream fileStream = new FileStream(targetExePath, FileMode.Create, FileAccess.Write))
+                {
+                    resourceStream.CopyTo(fileStream);
+                }
+            }
+
+            return targetExePath;
+        }
+
+        private static void StopEmbeddedResilioProcess()
+        {
+            foreach (var proc in Process.GetProcessesByName("Resilio Sync"))
+            {
+                try { proc.Kill(); proc.WaitForExit(1500); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Кнопка "УДАЛИТЬ МОДЫ"
+        /// </summary>
+        private async void DeleteResilioMods_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_resilioModsPath) || !Directory.Exists(_resilioModsPath))
+            {
+                MessageBox.Show("Папка с модами еще не выбрана.", "Удаление модов", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                $"Вы действительно хотите полностью удалить моды (@sg_core, @sg_islands, @sg_mods) из папки:\n{_resilioModsPath}?",
+                "Подтверждение удаления модов",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (confirm != MessageBoxResult.Yes) return;
+
+            try
+            {
+                if (DeleteResilioModsBtn != null)
+                {
+                    DeleteResilioModsBtn.IsEnabled = false;
+                    DeleteResilioModsBtn.Content = "УДАЛЕНИЕ...";
+                }
+
+                // Останавливаем процесс Resilio, чтобы он не держал файлы
+                _isAutoSyncActive = false;
+                _isResilioPaused = false;
+                StopEmbeddedResilioProcess();
+
+                string targetPath = _resilioModsPath;
+
+                await Task.Run(() =>
+                {
+                    string[] subDirsToDelete = { "@sg_core", "@sg_islands", "@sg_mods", ".sync" };
+                    foreach (string sub in subDirsToDelete)
+                    {
+                        string fullSubPath = Path.Combine(targetPath, sub);
+                        if (Directory.Exists(fullSubPath))
+                        {
+                            try
+                            {
+                                var di = new DirectoryInfo(fullSubPath) { Attributes = FileAttributes.Normal };
+                                foreach (var info in di.GetFileSystemInfos("*", SearchOption.AllDirectories))
+                                    info.Attributes = FileAttributes.Normal;
+
+                                Directory.Delete(fullSubPath, true);
+                            }
+                            catch { }
+                        }
+                    }
+                });
+
+                _cachedModsIntegrity = CheckModsFolderIntegrity(_resilioModsPath);
+                UpdateResilioModsFolderUi();
+
+                if (ResilioDownloadActivePanel != null) ResilioDownloadActivePanel.Visibility = Visibility.Collapsed;
+                if (ResilioDownloadCompletePanel != null) ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                if (OneClickDownloadModsBtn != null) OneClickDownloadModsBtn.Content = "СКАЧАТЬ МОДЫ";
+
+                MessageBox.Show("Моды проекта успешно удалены с диска.", "Удаление завершено", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка при удалении модов:\n{ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                if (DeleteResilioModsBtn != null)
+                {
+                    DeleteResilioModsBtn.IsEnabled = true;
+                    DeleteResilioModsBtn.Content = "УДАЛИТЬ МОДЫ";
+                }
+            }
+        }
+
+        /// <summary>
+        /// Обработчик кнопки: "СКАЧАТЬ МОДЫ В 1 КЛИК" <-> "⏸ ПАУЗА" <-> "▶ ПРОДОЛЖИТЬ"
+        /// </summary>
+        private void OneClickDownloadMods_Click(object sender, RoutedEventArgs e)
+        {
+            // 1. Если загрузка идет -> ставим на ПАУЗУ
+            if (_isAutoSyncActive && !_isResilioPaused)
+            {
+                _isResilioPaused = true;
+                StopEmbeddedResilioProcess();
+
+                if (OneClickDownloadModsBtn != null)
+                    OneClickDownloadModsBtn.Content = "▶ ПРОДОЛЖИТЬ";
+
+                if (ResilioSyncStatusTitle != null)
+                {
+                    ResilioSyncStatusTitle.Text = "⏸ Загрузка на паузе";
+                    ResilioSyncStatusTitle.Foreground = new SolidColorBrush(Color.FromRgb(255, 183, 77));
+                }
+
+                if (ResilioSpeedText != null)
+                    ResilioSpeedText.Text = "Скорость: Пауза";
+
+                return;
+            }
+
+            // 2. Если стоит на паузе -> ПРОДОЛЖИТЬ (без мигания плашки завершения)
+            if (_isAutoSyncActive && _isResilioPaused)
+            {
+                if (!string.IsNullOrEmpty(_resilioModsPath) && Directory.Exists(_resilioModsPath))
+                {
+                    _isResilioPaused = false;
+                    // Защитный интервал 10 секунд на запуск процесса, чтобы статус не прыгал
+                    _resilioResumeGraceUntil = DateTime.UtcNow.AddSeconds(10);
+
+                    if (ResilioDownloadCompletePanel != null)
+                        ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                    if (ResilioDownloadActivePanel != null)
+                        ResilioDownloadActivePanel.Visibility = Visibility.Visible;
+
+                    if (OneClickDownloadModsBtn != null)
+                        OneClickDownloadModsBtn.Content = "⏸ ПАУЗА";
+
+                    if (ResilioSyncStatusTitle != null)
+                    {
+                        ResilioSyncStatusTitle.Text = "⏳ Возобновление загрузки...";
+                        ResilioSyncStatusTitle.Foreground = new SolidColorBrush(Color.FromRgb(41, 182, 246));
+                    }
+
+                    StartResilioAutoSync(_resilioModsPath);
+                    return;
+                }
+            }
+
+            // 3. Первый запуск ("СКАЧАТЬ МОДЫ В 1 КЛИК") — выбираем папку
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "Выберите папку, куда будут скачиваться моды SolidGames"
+            };
+
+            if (dialog.ShowDialog() != true) return;
+
+            string selectedFolder = dialog.FolderName;
+
+            CheckAndHandleForeignSyncFolder(selectedFolder);
+
+            _resilioModsPath = selectedFolder;
+            SaveUserSettings();
+
+            _isAutoSyncActive = true;
+            _isResilioPaused = false;
+            _resilioResumeGraceUntil = DateTime.UtcNow.AddSeconds(10);
+
+            if (OneClickDownloadModsBtn != null)
+                OneClickDownloadModsBtn.Content = "⏸ ПАУЗА";
+
+            if (ResilioDownloadCompletePanel != null)
+                ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+            if (ResilioDownloadActivePanel != null)
+                ResilioDownloadActivePanel.Visibility = Visibility.Visible;
+
+            StartResilioAutoSync(selectedFolder);
+            _ = UpdateResilioDownloadProgressUiAsync();
+        }
+
+        private void StartResilioAutoSync(string targetModsDirectory)
+        {
+            try
+            {
+                DisableResilioUpdatePromptsInRegistry();
+                string resilioExe = EnsureResilioExtracted();
+
+                string storagePath = Path.Combine(AppDataDirectory, "ResilioStorage");
+                Directory.CreateDirectory(storagePath);
+
+                var sharedFoldersJson = new List<string>();
+
+                foreach (var kvp in _projectResilioKeys)
+                {
+                    string subFolder = string.IsNullOrEmpty(kvp.Key)
+                        ? targetModsDirectory
+                        : Path.Combine(targetModsDirectory, kvp.Key);
+
+                    Directory.CreateDirectory(subFolder);
+
+                    // Создаем маркер нашего лаунчера в папке .sync
+                    string syncSubDir = Path.Combine(subFolder, ".sync");
+                    Directory.CreateDirectory(syncSubDir);
+                    File.WriteAllText(Path.Combine(syncSubDir, "sg_launcher.marker"), "SolidGamesLauncher");
+
+                    string escapedDir = subFolder.Replace("\\", "\\\\");
+
+                    sharedFoldersJson.Add($@"    {{
+      ""secret"" : ""{kvp.Value}"",
+      ""dir"" : ""{escapedDir}"",
+      ""use_relay_server"" : true,
+      ""use_tracker"" : true,
+      ""search_lan"" : true,
+      ""use_sync_trash"" : false,
+      ""overwrite_changes"" : true
+    }}");
+                }
+
+                string escapedStorage = storagePath.Replace("\\", "\\\\");
+                string deviceName = $"SG_{Environment.UserName}";
+
+                // Полное отключение GUI и любых уведомлений об обновлении Resilio
+                string configContent = $@"{{
+  ""device_name"": ""{deviceName}"",
+  ""storage_path"": ""{escapedStorage}"",
+  ""use_gui"": false,
+  ""check_for_updates"": false,
+  ""display_new_version"": false,
+  ""rate_limit_local_peers"": false,
+  ""use_upnp"": true,
+  ""download_limit"": 0,
+  ""upload_limit"": 0,
+  ""shared_folders"": [
+{string.Join(",\n", sharedFoldersJson)}
+  ]
+}}";
+
+                string configFilePath = Path.Combine(AppDataDirectory, "sync.conf");
+                File.WriteAllText(configFilePath, configContent);
+
+                StopEmbeddedResilioProcess();
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = resilioExe,
+                    Arguments = $"/noinstall /minimized /S /config \"{configFilePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Не удалось запустить фоновую синхронизацию:\n{ex.Message}",
+                                "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private double GetResilioDownloadSpeedMbPerSec()
+        {
+            var procs = Process.GetProcessesByName("Resilio Sync");
+            if (procs.Length == 0)
+            {
+                _lastProcessWriteBytes = -1;
+                _smoothedSpeedMbPerSec = 0;
+                return 0;
+            }
+
+            long totalWriteBytes = 0;
+            foreach (var p in procs)
+            {
+                try
+                {
+                    if (GetProcessIoCounters(p.Handle, out IO_COUNTERS counters))
+                        totalWriteBytes += (long)counters.WriteTransferCount;
+                }
+                catch { }
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if (_lastProcessWriteBytes < 0 || _lastSpeedCheckTime == DateTime.MinValue)
+            {
+                _lastProcessWriteBytes = totalWriteBytes;
+                _lastSpeedCheckTime = now;
+                return 0;
+            }
+
+            double seconds = (now - _lastSpeedCheckTime).TotalSeconds;
+            if (seconds <= 0.2) return _smoothedSpeedMbPerSec;
+
+            long deltaBytes = Math.Max(0, totalWriteBytes - _lastProcessWriteBytes);
+            double currentSpeedMb = (deltaBytes / (1024.0 * 1024.0)) / seconds;
+
+            _lastProcessWriteBytes = totalWriteBytes;
+            _lastSpeedCheckTime = now;
+
+            _smoothedSpeedMbPerSec = currentSpeedMb > 0.05
+                ? (_smoothedSpeedMbPerSec * 0.4) + (currentSpeedMb * 0.6)
+                : 0;
+
+            return _smoothedSpeedMbPerSec;
+        }
+
+        private async Task UpdateResilioDownloadProgressUiAsync()
+        {
+            if (_isScanningProgress || ResilioDownloadActivePanel == null || ResilioDownloadCompletePanel == null)
+                return;
+
+            if (string.IsNullOrEmpty(_resilioModsPath) || !Directory.Exists(_resilioModsPath))
+            {
+                ResilioDownloadActivePanel.Visibility = Visibility.Collapsed;
+                ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                if (OneClickDownloadModsBtn != null)
+                    OneClickDownloadModsBtn.Content = "СКАЧАТЬ МОДЫ";
+                return;
+            }
+
+            if (_isResilioPaused)
+            {
+                ResilioDownloadActivePanel.Visibility = Visibility.Visible;
+                ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                if (OneClickDownloadModsBtn != null)
+                    OneClickDownloadModsBtn.Content = "▶ ПРОДОЛЖИТЬ";
+                return;
+            }
+
+            _isScanningProgress = true;
+
+            try
+            {
+                double speedMb = GetResilioDownloadSpeedMbPerSec();
+                var integrity = await Task.Run(() => CheckModsFolderIntegrity(_resilioModsPath));
+                _cachedModsIntegrity = integrity;
+
+                UpdateResilioModsFolderUi();
+
+                bool isInGracePeriod = DateTime.UtcNow < _resilioResumeGraceUntil;
+                bool isResilioRunning = Process.GetProcessesByName("Resilio Sync").Length > 0;
+
+                // Считаем загрузку завершенной ТОЛЬКО если прошёл стартовый интервал,
+                // нет файлов .!sync/.rsls, все .pbo на месте и размер >= 77.2 ГБ
+                if (!isInGracePeriod && integrity.IsFullyReady && speedMb < 0.1)
+                {
+                    _isAutoSyncActive = false;
+                    ResilioDownloadActivePanel.Visibility = Visibility.Collapsed;
+                    ResilioDownloadCompletePanel.Visibility = Visibility.Visible;
+
+                    if (OneClickDownloadModsBtn != null)
+                        OneClickDownloadModsBtn.Content = "СКАЧАТЬ МОДЫ";
+
+                    return;
+                }
+
+                // Если идет активное скачивание или сверка
+                if (_isAutoSyncActive || isResilioRunning || integrity.IncompleteFilesCount > 0)
+                {
+                    _isAutoSyncActive = true;
+                    ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                    ResilioDownloadActivePanel.Visibility = Visibility.Visible;
+
+                    if (OneClickDownloadModsBtn != null)
+                        OneClickDownloadModsBtn.Content = "⏸ ПАУЗА";
+
+                    long expectedTotalBytes = (long)(ExpectedModpackSizeGb * 1024.0 * 1024.0 * 1024.0);
+                    long knownTotalBytes = Math.Max(expectedTotalBytes, integrity.CompletedBytes + integrity.TempBytes);
+
+                    long downloadedBytes = integrity.CompletedBytes;
+                    long remainingBytes = Math.Max(0, knownTotalBytes - downloadedBytes);
+
+                    double progressPercent = knownTotalBytes > 0
+                        ? Math.Clamp((double)downloadedBytes / knownTotalBytes * 100.0, 0.0, 99.9)
+                        : 0.0;
+
+                    double downloadedGb = downloadedBytes / (1024.0 * 1024.0 * 1024.0);
+                    double remainingGb = remainingBytes / (1024.0 * 1024.0 * 1024.0);
+
+                    ResilioSyncStatusTitle.Foreground = new SolidColorBrush(Color.FromRgb(41, 182, 246));
+                    ResilioSyncStatusTitle.Text = speedMb > 0.05
+                        ? "⬇ Скачивание модов..."
+                        : "⏳ Подключение к раздаче и сверка файлов...";
+
+                    ResilioSpeedText.Text = $"Скорость: {speedMb:F1} МБ/с";
+                    ResilioProgressBar.Value = progressPercent;
+                    ResilioDownloadedText.Text = $"Скачано: {downloadedGb:F2} ГБ";
+                    ResilioRemainingText.Text = $"Осталось: {remainingGb:F2} ГБ ({progressPercent:F0}%)";
+                }
+                else
+                {
+                    ResilioDownloadActivePanel.Visibility = Visibility.Collapsed;
+                    ResilioDownloadCompletePanel.Visibility = Visibility.Collapsed;
+                    if (OneClickDownloadModsBtn != null)
+                        OneClickDownloadModsBtn.Content = "СКАЧАТЬ МОДЫ";
+                }
+            }
+            finally
+            {
+                _isScanningProgress = false;
+            }
+        }
+
+
     }
 }

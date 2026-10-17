@@ -1,5 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
+	
+	<PropertyGroup>
+		<Version>1.2.0</Version>
+		<!-- остальные настройки проекта -->
+	</PropertyGroup>
 	<PropertyGroup>
 		<OutputType>WinExe</OutputType>
 		<TargetFramework>net10.0-windows</TargetFramework>
@@ -24,6 +28,7 @@
     <None Remove="bg1920w.jpg" />
     <None Remove="icon.ico" />
     <None Remove="logo.png" />
+    <None Remove="Resources\Resilio Sync.exe" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,10 +41,13 @@
     <EmbeddedResource Include="logo.png">
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </EmbeddedResource>
+    <EmbeddedResource Include="Resources\Resilio Sync.exe" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
   </ItemGroup>
-
+	<ItemGroup>
+		<PackageReference Include="DiscordRichPresence" Version="1.2.1.24" />
+	</ItemGroup>
 </Project>
